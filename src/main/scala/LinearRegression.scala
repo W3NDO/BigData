@@ -33,25 +33,54 @@ object LinearRegression {
       favorite_count => number of likes the tweet has?
      */
 
-    // Selects for the features we want to train on.
+    // FEATURE SELECTION ::  Selects for the features we want to train on.
     def parseTweets(filePath: String): DataFrame = {
       val tweetSchema: StructType = ss.read.json(filePath).schema
 
       val tweetsDataframe = ss.read
         .json(filePath)
         .withColumn("text", functions.from_json($"text", tweetSchema))
-        .persist()
+        // .persist()
 
+      // retweeted status = true added no new tweets.
       val tweets = tweetsDataframe
         .select($"quoted_status.user.followers_count", $"quoted_status.created_at", $"quoted_status.text", $"is_quote_status", $"quoted_status.retweet_count", $"quoted_status.reply_count", $"quoted_status.favorite_count")
         .where("is_quote_status = true")
-        .where("retweeted = true")
 
-      tweets
+      tweets // returns a dataset
     }
 
-    val tweets = parseTweets("data/tweets")
-    tweets.show()
+    val tweets = parseTweets("data/tweets").persist() // persist the stored projection
+//     tweets.select($"followers_count").show()
+
+    // FEATURE SCALING
+
+    def scaleFeatures(inputDataset: DataFrame): DataFrame = {
+      // formula for integers zi = (xi - mean)/stdDev
+      // TODO find formula for datetime
+      // TODO find formula for text(TF-IDF????)
+      val intFields = ("followers_count", "retweet_count", "reply_count", "favorite_count")
+      val stringFields = ("text")
+      val dateTimeField = ("created_at")
+      val getDeviation(value: Long, mean: Long) => ((value - mean) * (value - mean))
+
+      val fieldSum = (dataset: DataFrame, field: String) => dataset.select(functions.sum($"$field"))
+      val fieldCount = (dataset: DataFrame, field: String) => dataset.select($"$field").where(s"${field} > 0")
+      val fieldMean = (sum: Long, count: Long) => sum/count
+      val fieldDeviations = (dataset: DataFrame, field: String, mean: Long ) => dataset
+        .select($"$field")
+        .map( row  => (row.getLong(0) - mean) * (row.getLong(0) - mean) )
+      
+
+      }
+
+      val followersElemCount = fieldCount(inputDataset, "followers_count").first.getLong(0)
+      val followersSum = fieldSum(inputDataset, "followers_count").first.getLong(0)
+      println(">> Field Sum:: " + fieldMean(followersSum, followersElemCount) )
+      inputDataset // TODO change this
+    }
+
+    scaleFeatures(tweets).show()
 
     System.in.read() // TODO Remove this for cluster test
   }
