@@ -3,6 +3,7 @@ import org.apache.spark.sql.catalyst.ScalaReflection
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{Partitioner, SparkConf, SparkContext}
+import scala.math._
 
 object LinearRegression {
   def main(args: Array[String]): Unit = {
@@ -60,24 +61,27 @@ object LinearRegression {
       // TODO find formula for datetime
       // TODO find formula for text(TF-IDF????)
       val intFields = ("followers_count", "retweet_count", "reply_count", "favorite_count")
-      val stringFields = ("text")
-      val dateTimeField = ("created_at")
-      val getDeviation(value: Long, mean: Long) => ((value - mean) * (value - mean))
+      val allFields = ("created_at", "text", "followers_count", "retweet_count", "reply_count", "favorite_count")
+      val getDeviation = (value: Long, mean: Long) => ((value - mean) * (value - mean))
 
       val fieldSum = (dataset: DataFrame, field: String) => dataset.select(functions.sum($"$field"))
       val fieldCount = (dataset: DataFrame, field: String) => dataset.select($"$field").where(s"${field} > 0")
       val fieldMean = (sum: Long, count: Long) => sum/count
-      val fieldDeviations = (dataset: DataFrame, field: String, mean: Long ) => dataset
-        .select($"$field")
-        .map( row  => (row.getLong(0) - mean) * (row.getLong(0) - mean) )
-      
-
+      val fieldDeviations = (dataset: DataFrame, field: String, mean: Long ) => {
+        dataset.select( $"${field}", ( ($"${field}" - mean) * ($"${field}" - mean) ).alias( s"${field}_deviations" ) )
       }
+      val totalFieldDeviation = (dataset: DataFrame, field: String) => dataset.select(functions.sum($"${field}_deviations"))
 
-      val followersElemCount = fieldCount(inputDataset, "followers_count").first.getLong(0)
+      // TODO build a function that returns field_deviation columns for all numeric fields then map it to return the z-score
+      // Read on how the functions can be calculated on the worker nodes vs the co-ordinator node.
+
+      val thisFieldCount = fieldCount(inputDataset, "followers_count").first.getLong(0)
       val followersSum = fieldSum(inputDataset, "followers_count").first.getLong(0)
-      println(">> Field Sum:: " + fieldMean(followersSum, followersElemCount) )
-      inputDataset // TODO change this
+      val mean = fieldMean(followersSum, thisFieldCount)
+      val deviations =  fieldDeviations(inputDataset, "followers_count", mean)
+      val standardDev = sqrt(fieldMean(totalFieldDeviation(deviations, "followers_count").first.getLong(0), thisFieldCount ))
+      println(">> Field Variance:: " + standardDev )
+      deviations // TODO change this
     }
 
     scaleFeatures(tweets).show()
