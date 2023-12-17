@@ -3,6 +3,8 @@ import org.apache.spark.sql.catalyst.ScalaReflection
 import org.apache.spark.sql.types.{DataType, StructType}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.{Partitioner, SparkConf, SparkContext}
+
+import scala.collection.mutable
 import scala.math._
 
 object LinearRegression {
@@ -34,6 +36,9 @@ object LinearRegression {
       favorite_count => number of likes the tweet has?
      */
 
+    // TODO Return values of actions are always communicated to the driver program.
+    // TODO Distributable actions for dataframes??
+
     // FEATURE SELECTION ::  Selects for the features we want to train on.
     def parseTweets(filePath: String): DataFrame = {
       val tweetSchema: StructType = ss.read.json(filePath).schema
@@ -41,50 +46,77 @@ object LinearRegression {
       val tweetsDataframe = ss.read
         .json(filePath)
         .withColumn("text", functions.from_json($"text", tweetSchema))
-        // .persist()
 
       // retweeted status = true added no new tweets.
       val tweets = tweetsDataframe
-        .select($"quoted_status.user.followers_count", $"quoted_status.created_at", $"quoted_status.text", $"is_quote_status", $"quoted_status.retweet_count", $"quoted_status.reply_count", $"quoted_status.favorite_count")
+        .select(
+          (($"reply_count" * 0) + 1).alias("z_0"),
+          $"quoted_status.user.followers_count",
+          $"quoted_status.created_at",
+          $"quoted_status.text",
+          $"is_quote_status",
+          $"quoted_status.retweet_count",
+          $"quoted_status.reply_count",
+          $"quoted_status.favorite_count")
         .where("is_quote_status = true")
 
       tweets // returns a dataset
     }
 
-    val tweets = parseTweets("data/tweets").persist() // persist the stored projection
-//     tweets.select($"followers_count").show()
-
     // FEATURE SCALING
-
     def scaleFeatures(inputDataset: DataFrame): DataFrame = {
-      // formula for integers zi = (xi - mean)/stdDev
-      // TODO find formula for datetime
-      // TODO find formula for text(TF-IDF????)
-      val intFields = ("followers_count", "retweet_count", "reply_count", "favorite_count")
-      val allFields = ("created_at", "text", "followers_count", "retweet_count", "reply_count", "favorite_count")
-      val getDeviation = (value: Long, mean: Long) => ((value - mean) * (value - mean))
 
-      val fieldSum = (dataset: DataFrame, field: String) => dataset.select(functions.sum($"$field"))
-      val fieldCount = (dataset: DataFrame, field: String) => dataset.select($"$field").where(s"${field} > 0")
-      val fieldMean = (sum: Long, count: Long) => sum/count
+      val intFields = Map[String, Int](
+        "followers_count" -> 0,
+        "retweet_count" -> 0,
+        "reply_count" -> 0,
+        "favorite_count" -> 0
+      )
+
+      // Lambdas to apply on the dataFrame.
+      val fieldSum = (dataset: DataFrame, field: String) => dataset.select(functions.sum($"$field")).first.getLong(0)
+      val fieldMean = (sum: Long, count: Long) => (sum / count)
       val fieldDeviations = (dataset: DataFrame, field: String, mean: Long ) => {
-        dataset.select( $"${field}", ( ($"${field}" - mean) * ($"${field}" - mean) ).alias( s"${field}_deviations" ) )
+        dataset.select(
+          $"${field}",
+          ( ($"${field}" - mean) * ($"${field}" - mean) ).alias( s"${field}_deviations" ) )
       }
-      val totalFieldDeviation = (dataset: DataFrame, field: String) => dataset.select(functions.sum($"${field}_deviations"))
+      val totalFieldDeviation = (dataset: DataFrame, field: String) => dataset.select(functions.sum($"${field}_deviations")).first.getLong(0)
 
-      // TODO build a function that returns field_deviation columns for all numeric fields then map it to return the z-score
-      // Read on how the functions can be calculated on the worker nodes vs the co-ordinator node.
+      val getStdDevAndMean = (inputDataset: DataFrame, field: String, count: Long) =>  {
+        val sum = fieldSum(inputDataset, field)
+        val mean = fieldMean(sum, count)
+        val deviations = fieldDeviations(inputDataset, field, mean)
+        val totalDeviations = totalFieldDeviation(deviations, field)
+        val standardDeviation = sqrt(totalFieldDeviation(deviations, field)/(count - 1))
 
-      val thisFieldCount = fieldCount(inputDataset, "followers_count").first.getLong(0)
-      val followersSum = fieldSum(inputDataset, "followers_count").first.getLong(0)
-      val mean = fieldMean(followersSum, thisFieldCount)
-      val deviations =  fieldDeviations(inputDataset, "followers_count", mean)
-      val standardDev = sqrt(fieldMean(totalFieldDeviation(deviations, "followers_count").first.getLong(0), thisFieldCount ))
-      println(">> Field Variance:: " + standardDev )
-      deviations // TODO change this
+        (mean, standardDeviation)
+      }
+
+      val count = inputDataset.count()
+
+      val stdDevMean = intFields.map{ case(field, value) =>
+        field -> getStdDevAndMean(inputDataset, field, count)
+      }
+      val (flCountMean, flCountStdDev) = stdDevMean("followers_count")
+      val (rtCountMean, rtCountStdDev) = stdDevMean("retweet_count")
+      val (reCountMean, reCountStdDev) = stdDevMean("reply_count")
+      val (fvCountMean, fvCountStdDev) = stdDevMean("favorite_count")
+
+      val standardizedDataframe = inputDataset.select($"z_0", $"created_at", $"text",
+        (($"followers_count" - flCountMean )/flCountStdDev ).alias("followers_count"),
+        (($"retweet_count" - rtCountMean )/rtCountStdDev ).alias("retweet_count"),
+        (($"reply_count" - reCountMean )/reCountStdDev ).alias("reply_count"),
+        (($"favorite_count" - fvCountMean )/fvCountStdDev ).alias("favorite_count")
+      )
+      standardizedDataframe
     }
 
-    scaleFeatures(tweets).show()
+    val tweets = parseTweets("data/tweets").persist() // persist the features we want.
+    val scaledDataset = scaleFeatures(tweets).persist() // TODO some features refuse to scale at all. No idea why
+    tweets.unpersist() // we no longer need the tweets RDD
+
+    scaledDataset.show()
 
     System.in.read() // TODO Remove this for cluster test
   }
